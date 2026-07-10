@@ -1,0 +1,123 @@
+version: '3.8'
+
+services:
+  # 1Password Connect Server (optional - for service account authentication)
+  onepassword-connect:
+    image: 1password/connect-api:latest
+    container_name: onepassword-connect-api
+    environment:
+      - OP_SESSION=${OP_CONNECT_TOKEN}
+    ports:
+      - "8080:8080"
+    volumes:
+      - onepassword_connect_data:/home/opuser/.op/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Example API MCP Server with 1Password integration
+  api-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.op
+    container_name: api-mcp-server
+    environment:
+      # 1Password Configuration
+      - OP_VAULT=production
+      - OP_CONNECT_HOST=onepassword-connect-api:8080
+      - OP_CONNECT_TOKEN=${OP_CONNECT_TOKEN}
+
+      # Secrets loaded via 1Password
+      - DATABASE_URL=op://production/Database/connection-string
+      - API_KEY=op://production/API/key
+      - GITHUB_TOKEN=op://production/GitHub/token
+
+      # Application Config
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+    ports:
+      - "3000:3000"
+    depends_on:
+      onepassword-connect:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # GitHub MCP Server
+  github-mcp-server:
+    build:
+      context: ./github-mcp-server
+      dockerfile: Dockerfile.op
+    container_name: github-mcp-server
+    environment:
+      - OP_VAULT=production
+      - OP_CONNECT_HOST=onepassword-connect-api:8080
+      - OP_CONNECT_TOKEN=${OP_CONNECT_TOKEN}
+      - GITHUB_TOKEN=op://production/GitHub/token
+      - NODE_ENV=production
+    ports:
+      - "3001:3001"
+    depends_on:
+      onepassword-connect:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # SSH MCP Server
+  mcp-ssh-server:
+    build:
+      context: ./mcp-ssh-server
+      dockerfile: Dockerfile.op
+    container_name: mcp-ssh-server
+    environment:
+      - OP_VAULT=production
+      - OP_CONNECT_HOST=onepassword-connect-api:8080
+      - OP_CONNECT_TOKEN=${OP_CONNECT_TOKEN}
+      - SSH_PRIVATE_KEY=op://production/SSH/private-key
+      - NODE_ENV=production
+    ports:
+      - "2222:2222"
+    depends_on:
+      onepassword-connect:
+        condition: service_healthy
+    volumes:
+      - ssh_data:/home/sshuser/.ssh
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # Tailscale Sidecar (for secure network access)
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale-connector
+    environment:
+      - TS_AUTHKEY=${TAILSCALE_AUTH_KEY}
+      - TS_HOSTNAME=mcp-server-cluster
+      - TS_STATE_DIR=/var/lib/tailscale
+    ports:
+      - "41641:41641/udp"
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+volumes:
+  onepassword_connect_data:
+  ssh_data:
+  tailscale_state:
+
+networks:
+  mcp-network:
+    driver: bridge

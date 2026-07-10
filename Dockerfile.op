@@ -1,0 +1,67 @@
+FROM node:20-alpine AS base
+
+# Install 1Password CLI and Tailscale CA certificates
+RUN apk add --no-cache \
+    curl \
+    gnupg \
+    ca-certificates \
+    git \
+    bash \
+    python3 \
+    py3-pip
+
+# Download and install 1Password CLI
+RUN curl -sLO https://downloads.1password.com/linux/release/amd64/op_linux_amd64_v2.zip && \
+    unzip -q op_linux_amd64_v2.zip && \
+    mv op /usr/local/bin/ && \
+    chmod +x /usr/local/bin/op && \
+    rm op_linux_amd64_v2.zip && \
+    op --version
+
+# Install Python dependencies for secret management
+WORKDIR /tmp
+COPY secrets_manager.py .
+RUN pip3 install --no-cache-dir pydantic python-dotenv
+
+FROM base AS builder
+
+WORKDIR /app
+
+# Copy project files
+COPY package*.json ./
+COPY tsconfig*.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+FROM base AS runtime
+
+WORKDIR /app
+
+# Copy from builder
+COPY --from=builder /app/node_modules ./node_modules
+
+# Copy application source
+COPY . .
+
+# Copy Python secrets manager
+COPY scripts/load-secrets.sh ./scripts/
+COPY scripts/secrets-loader.py ./scripts/
+
+# Create non-root user
+RUN addgroup -g 1001 -S app && \
+    adduser -S app -u 1001 && \
+    chown -R app:app /app
+
+USER app
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+# Entrypoint that loads secrets and starts application
+COPY docker-entrypoint.op.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.op.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.op.sh"]
+CMD ["npm", "start"]
